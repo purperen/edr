@@ -155,6 +155,30 @@ impl TracingStep {
             memory,
         }
     }
+
+    // Function to check if the top of the stack does not look like a valid hash
+    pub fn is_valid(step: &edr_evm::trace::Step) -> bool {
+        let stack = step.stack.full().map_or_else(
+            || {
+                // Only get the top element as the fallback if the full stack is not available
+                step.stack.top().map(u256_to_bigint)
+            },
+            |stack| {
+                // Return the last element of the stack if it's fully available
+                stack.last().map(u256_to_bigint)
+            },
+        );
+        // Check if we have a BigInt (unwrap the Option)
+        if let Some(top_element) = stack {
+            // Call get_i64 on the BigInt to extract the value
+            let (value, _sign) = top_element.get_i64();
+            // Check if the top element is greater than 1M
+            value > 1024*1024
+        } else {
+            // Return false if no stack element is present
+            false
+        }
+    }    
 }
 
 fn u256_to_bigint(v: &edr_evm::U256) -> BigInt {
@@ -185,7 +209,7 @@ impl RawTrace {
 #[napi]
 impl RawTrace {
     #[napi]
-    pub fn trace(
+    pub fn old_trace(
         &self,
         env: Env,
     ) -> napi::Result<Vec<Either3<TracingMessage, TracingStep, TracingMessageResult>>> {
@@ -201,5 +225,43 @@ impl RawTrace {
                     .map(|execution_result| Either3::C(TracingMessageResult { execution_result })),
             })
             .collect::<napi::Result<_>>()
+    }
+
+    #[napi]
+    pub fn trace(
+        &self,
+        env: Env,
+    ) -> napi::Result<Vec<Either3<TracingMessage, TracingStep, TracingMessageResult>>> {
+        // Pre-allocate the vector with a known capacity to avoid reallocations
+        let mut result_vec = Vec::with_capacity(self.inner.messages.len());
+
+        for message in &self.inner.messages {
+            let either = match message {
+                edr_evm::trace::TraceMessage::Before(message) => {
+                    // Directly handle the result of TracingMessage::new, avoid extra map calls
+                    match TracingMessage::new(&env, message) {
+                        Ok(tracing_message) => Either3::A(tracing_message),
+                        Err(e) => return Err(e), // Propagate error immediately
+                    }
+                }
+                edr_evm::trace::TraceMessage::Step(step) => {
+                    // Check if the stack has elements and test the top element of the stack
+                    if TracingStep::is_valid(step) {
+                       Either3::B(TracingStep::new(step))
+                    } else {
+                        continue; // Skip if the step is not valid
+                    }
+                }
+                edr_evm::trace::TraceMessage::After(message) => {
+                    // Directly handle ExecutionResult, similar to Before case
+                    match ExecutionResult::new(&env, message) {
+                        Ok(execution_result) => Either3::C(TracingMessageResult { execution_result }),
+                        Err(e) => return Err(e), // Propagate error immediately
+                    }
+                }
+            };
+            result_vec.push(either); // Push directly into the pre-allocated vector
+        }
+        Ok(result_vec) // Return the vector at the end
     }
 }

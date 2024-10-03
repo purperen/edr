@@ -117,3 +117,6 @@ Brewfile.lock.json
 
 # Benchmark
 benchmark-output.json
+
+# joe backup files
+*~
